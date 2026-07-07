@@ -185,4 +185,4 @@ function smoothNoise(seed: number, t: number): number
 
 ## License
 
-MIT
+GNU LESSER GENERAL PUBLIC LICENSE
