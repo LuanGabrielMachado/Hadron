@@ -1,0 +1,1264 @@
+---
+
+## 📋 Visão Geral do Plano
+
+```
+🎯 Objetivo: Transformar o Hadron em um motor de partículas profissional, 
+             performático e extensível para produção.
+
+📦 Escopo:
+✅ Melhorias de Performance (crítico)
+✅ Novas funcionalidades de física (valor)
+✅ Sistema de renderização modular (flexibilidade)
+✅ DX: API mais intuitiva + documentação (usabilidade)
+✅ Testes e qualidade (confiança)
+
+⏱️ Estimativa total: 6-8 semanas (trabalho focado)
+```
+
+---
+
+## 🗂️ FASE 1: Fundamentos de Performance (Semana 1-2) ⭐ PRIORIDADE MÁXIMA
+
+### 1.1 Spatial Hashing para Repulsão O(n²) → O(n)
+
+**Problema atual**: O loop de repulsão em `tick-particles.ts` é O(n²), travando com >200 partículas.
+
+**Solução**: Grid espacial para comparar apenas partículas próximas.
+
+#### 📁 Arquivos a criar/modificar:
+
+```
+src/engine/
+├── spatial-hash.ts          ← NOVO: Implementação do grid espacial
+├── tick-particles.ts        ← MODIFICAR: Usar spatial hash na repulsão
+└── options.ts               ← MODIFICAR: Adicionar opção enableSpatialHash
+```
+
+#### 📝 Código: `src/engine/spatial-hash.ts` (NOVO)
+
+```typescript
+/**
+ * Spatial Hash Grid - Otimiza detecção de proximidade entre partículas
+ * 
+ * POR QUE: Reduz comparações de repulsão de O(n²) para ~O(n)
+ * COMO: Divide o espaço em células; só compara partículas na mesma célula ou adjacentes
+ * 
+ * @param cellSize - Tamanho da célula (recomendado: 2-3x collisionRadius)
+ */
+export interface GridCell {
+  particleIndices: number[];
+}
+
+export class SpatialHash {
+  private cells: Map<string, GridCell>;
+  private cellSize: number;
+  private width: number;
+  private height: number;
+
+  constructor(width: number, height: number, cellSize: number) {
+    this.width = width;
+    this.height = height;
+    this.cellSize = cellSize;
+    this.cells = new Map();
+  }
+
+  /** Gera chave única para coordenada da célula */
+  private cellKey(col: number, row: number): string {
+    return `${col},${row}`;
+  }
+
+  /** Converte posição em coordenadas da célula */
+  private positionToCell(x: number, y: number): { col: number; row: number } {
+    return {
+      col: Math.max(0, Math.min(Math.floor(x / this.cellSize), Math.ceil(this.width / this.cellSize))),
+      row: Math.max(0, Math.min(Math.floor(y / this.cellSize), Math.ceil(this.height / this.cellSize))),
+    };
+  }
+
+  /** Popula o grid com partículas */
+  build(particles: Array<{ x: number; y: number }>): void {
+    this.cells.clear();
+    
+    for (let i = 0; i < particles.length; i++) {
+      const { col, row } = this.positionToCell(particles[i].x, particles[i].y);
+      const key = this.cellKey(col, row);
+      
+      if (!this.cells.has(key)) {
+        this.cells.set(key, { particleIndices: [] });
+      }
+      this.cells.get(key)!.particleIndices.push(i);
+    }
+  }
+
+  /** Retorna índices de partículas no raio de busca */
+  query(x: number, y: number, searchRadius: number): number[] {
+    const { col, row } = this.positionToCell(x, y);
+    const cellsToCheck = Math.ceil(searchRadius / this.cellSize);
+    const results: number[] = [];
+
+    for (let dr = -cellsToCheck; dr <= cellsToCheck; dr++) {
+      for (let dc = -cellsToCheck; dc <= cellsToCheck; dc++) {
+        const key = this.cellKey(col + dc, row + dr);
+        const cell = this.cells.get(key);
+        if (cell) {
+          results.push(...cell.particleIndices);
+        }
+      }
+    }
+    return results;
+  }
+}
+```
+
+#### 📝 Modificação: `src/engine/options.ts`
+
+```typescript
+export interface PhysicsOptions {
+  // ... opções existentes ...
+  
+  /**
+   * Habilita spatial hashing para otimizar repulsão entre partículas
+   * Recomendado para >100 partículas
+   * @default false
+   */
+  enableSpatialHash?: boolean;
+  
+  /**
+   * Tamanho da célula do grid espacial (em pixels)
+   * Recomendado: 2-3x collisionRadius
+   * @default collisionRadius * 2.5
+   */
+  spatialHashCellSize?: number;
+}
+```
+
+#### 📝 Modificação: `src/engine/tick-particles.ts` (trecho da repulsão)
+
+```typescript
+// ... dentro de tickParticles, após extrair opções ...
+
+// === SUBSTITUIR O LOOP DE REPULSÃO ATUAL POR: ===
+
+if (options.enableSpatialHash && particles.length > 50) {
+  // Usa spatial hashing para partículas numerosas
+  const cellSize = options.spatialHashCellSize ?? collisionRadius * 2.5;
+  const spatialHash = new SpatialHash(containerWidth, containerHeight, cellSize);
+  spatialHash.build(particles);
+  
+  const minDist = collisionRadius * 2;
+  const minDistSq = minDist * minDist;
+  
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    // Query só retorna partículas potencialmente próximas
+    const nearby = spatialHash.query(p.x, p.y, minDist);
+    
+    for (const j of nearby) {
+      if (j <= i) continue; // Evita duplicação e auto-comparação
+      
+      const dx = particles[j].x - p.x;
+      const dy = particles[j].y - p.y;
+      const distSq = dx * dx + dy * dy;
+      
+      if (distSq < minDistSq && distSq > 0) {
+        const dist = Math.sqrt(distSq);
+        const force = (repulsionStrength * (minDist - dist)) / dist;
+        const fx = dx * force;
+        const fy = dy * force;
+        
+        p.vx -= fx;
+        p.vy -= fy;
+        particles[j].vx += fx;
+        particles[j].vy += fy;
+      }
+    }
+  }
+} else {
+  // Fallback para o algoritmo original (compatibilidade)
+  const minDistSq = (collisionRadius * 2) ** 2;
+  for (let i = 0; i < particles.length; i++) {
+    for (let j = i + 1; j < particles.length; j++) {
+      // ... código original de repulsão ...
+    }
+  }
+}
+```
+
+**✅ Por que isso importa**: Com 200 partículas, reduz de ~20.000 para ~2.000 comparações = 10x mais rápido!
+
+---
+
+### 1.2 Web Workers para Processamento em Background
+
+**Problema**: Física pesada bloqueia a thread principal, causando lag na UI.
+
+**Solução**: Mover `tickParticles` para um Web Worker.
+
+#### 📁 Arquivos a criar:
+
+```
+src/engine/
+├── worker/
+│   ├── physics-worker.ts    ← NOVO: Worker que executa a física
+│   ├── worker-protocol.ts   ← NOVO: Tipagem das mensagens worker↔main
+│   └── index.ts             ← NOVO: Factory para criar/configurar worker
+├── tick-particles.ts        ← MODIFICAR: Exportar versão "pure" para worker
+```
+
+#### 📝 Código: `src/engine/worker/worker-protocol.ts` (NOVO)
+
+```typescript
+/**
+ * Protocolo de comunicação entre thread principal e worker
+ * 
+ * POR QUE: Tipagem segura para mensagens postMessage, evita erros de runtime
+ */
+
+export interface WorkerInitMessage {
+  type: 'init';
+  payload: {
+    containerWidth: number;
+    containerHeight: number;
+    options: import('../options').PhysicsOptions;
+  };
+}
+
+export interface WorkerTickMessage {
+  type: 'tick';
+  payload: {
+    particles: import('../particle').Particle[];
+    t: number;
+    externalForce: import('../options').ExternalForce | null;
+    obstacles: import('../options').ObstacleRect[] | null;
+  };
+}
+
+export interface WorkerResultMessage {
+  type: 'result';
+  payload: {
+    particles: import('../particle').Particle[];
+    t: number;
+  };
+}
+
+export type WorkerToMain = WorkerResultMessage;
+export type MainToWorker = WorkerInitMessage | WorkerTickMessage;
+```
+
+#### 📝 Código: `src/engine/worker/physics-worker.ts` (NOVO)
+
+```typescript
+/**
+ * Web Worker para processamento da física em background
+ * 
+ * POR QUE: Libera a thread principal para renderização e interações do usuário
+ * COMO: Recebe partículas via postMessage, executa tickParticles, devolve resultado
+ */
+
+import { tickParticles } from '../tick-particles';
+import type { MainToWorker, WorkerToMain } from './worker-protocol';
+
+let initialized = false;
+let containerWidth = 0;
+let containerHeight = 0;
+let options: import('../options').PhysicsOptions = {};
+
+self.onmessage = (e: MessageEvent<MainToWorker>) => {
+  switch (e.data.type) {
+    case 'init': {
+      containerWidth = e.data.payload.containerWidth;
+      containerHeight = e.data.payload.containerHeight;
+      options = e.data.payload.options;
+      initialized = true;
+      break;
+    }
+    
+    case 'tick': {
+      if (!initialized) {
+        console.warn('Physics worker not initialized');
+        return;
+      }
+      
+      const { particles, t, externalForce, obstacles } = e.data.payload;
+      
+      // Executa física (muta particles in-place)
+      tickParticles(
+        particles,
+        t,
+        containerWidth,
+        containerHeight,
+        externalForce,
+        obstacles,
+        options
+      );
+      
+      // Devolve partículas atualizadas (structured clone)
+      const response: WorkerToMain = {
+        type: 'result',
+        payload: { particles: structuredClone(particles), t }
+      };
+      self.postMessage(response);
+      break;
+    }
+  }
+};
+```
+
+#### 📝 Código: `src/engine/worker/index.ts` (NOVO)
+
+```typescript
+/**
+ * Factory e wrapper para o physics worker
+ * 
+ * POR QUE: Abstrai complexidade do postMessage, oferece API similar ao tickParticles síncrono
+ */
+
+import type { Particle } from '../particle';
+import type { PhysicsOptions, ExternalForce, ObstacleRect } from '../options';
+import type { MainToWorker, WorkerToMain } from './worker-protocol';
+
+export interface PhysicsWorkerOptions {
+  /** Callback chamado quando worker está pronto */
+  onReady?: () => void;
+  /** Callback com partículas atualizadas */
+  onResult?: (particles: Particle[], t: number) => void;
+  /** Fallback para thread principal se worker falhar */
+  fallbackToMain?: boolean;
+}
+
+export class PhysicsWorker {
+  private worker: Worker | null = null;
+  private ready = false;
+  private pendingTicks = 0;
+  
+  constructor(options: PhysicsWorkerOptions = {}) {
+    try {
+      // Tenta criar worker (pode falhar em alguns ambientes)
+      this.worker = new Worker(new URL('./physics-worker.ts', import.meta.url), { type: 'module' });
+      
+      this.worker.onmessage = (e: MessageEvent<WorkerToMain>) => {
+        if (e.data.type === 'result') {
+          options.onResult?.(e.data.payload.particles, e.data.payload.t);
+          this.pendingTicks = Math.max(0, this.pendingTicks - 1);
+        }
+      };
+      
+      this.ready = true;
+      options.onReady?.();
+    } catch (err) {
+      console.warn('Failed to create physics worker, falling back to main thread', err);
+      if (options.fallbackToMain !== false) {
+        this.ready = true; // Fallback ativado
+      }
+    }
+  }
+  
+  /**
+   * Inicializa o worker com configurações
+   */
+  init(containerWidth: number, containerHeight: number, options: PhysicsOptions): void {
+    if (!this.worker || !this.ready) return;
+    
+    const msg: MainToWorker = {
+      type: 'init',
+      payload: { containerWidth, containerHeight, options }
+    };
+    this.worker.postMessage(msg);
+  }
+  
+  /**
+   * Envia um tick para processamento
+   * @returns true se enviado para worker, false se fallback para main thread
+   */
+  tick(
+    particles: Particle[],
+    t: number,
+    externalForce: ExternalForce | null,
+    obstacles: ObstacleRect[] | null
+  ): boolean {
+    // Se worker não disponível ou muitos ticks pendentes, fallback
+    if (!this.worker || !this.ready || this.pendingTicks > 2) {
+      return false;
+    }
+    
+    const msg: MainToWorker = {
+      type: 'tick',
+      payload: { particles, t, externalForce, obstacles }
+    };
+    
+    this.worker.postMessage(msg);
+    this.pendingTicks++;
+    return true;
+  }
+  
+  /** Para o worker e libera recursos */
+  terminate(): void {
+    this.worker?.terminate();
+    this.worker = null;
+    this.ready = false;
+  }
+}
+```
+
+**✅ Por que isso importa**: Mantém a UI responsiva mesmo com simulações complexas.
+
+---
+
+## 🗂️ FASE 2: Novas Funcionalidades de Física (Semana 2-4)
+
+### 2.1 Sistema de Forças Personalizadas (Plugin API)
+
+**Problema**: Adicionar novas forças requer modificar `tick-particles.ts`, quebrando o princípio aberto/fechado.
+
+**Solução**: API de plugins para forças customizadas.
+
+#### 📁 Arquivos a criar:
+
+```
+src/engine/
+├── forces/
+│   ├── index.ts             ← NOVO: Tipos e registry de forças
+│   ├── base-force.ts        ← NOVO: Classe abstrata para forças
+│   ├── gravity.ts           ← NOVO: Exemplo: força gravitacional
+│   ├── vortex.ts            ← NOVO: Exemplo: força de vórtice
+│   └── custom-force.ts      ← NOVO: Factory para forças do usuário
+├── tick-particles.ts        ← MODIFICAR: Aplicar forças registradas
+```
+
+#### 📝 Código: `src/engine/forces/base-force.ts` (NOVO)
+
+```typescript
+/**
+ * Classe base para forças personalizáveis
+ * 
+ * POR QUE: Padroniza interface para plugins de força, facilita composição
+ */
+
+import type { Particle } from '../particle';
+
+export interface ForceContext {
+  t: number;                    // Frame atual
+  containerWidth: number;       // Dimensões do container
+  containerHeight: number;
+  options: import('../options').PhysicsOptions;
+}
+
+export abstract class BaseForce {
+  /**
+   * Aplica força a uma partícula
+   * @param particle - Partícula a ser modificada (mutável)
+   * @param ctx - Contexto da simulação
+   * @param allParticles - Todas as partículas (para forças que dependem do estado global)
+   */
+  abstract apply(
+    particle: Particle,
+    ctx: ForceContext,
+    allParticles: Particle[]
+  ): void;
+  
+  /**
+   * Cleanup opcional quando força é removida
+   */
+  destroy?(): void;
+}
+```
+
+#### 📝 Código: `src/engine/forces/gravity.ts` (NOVO)
+
+```typescript
+/**
+ * Força gravitacional direcional ou pontual
+ * 
+ * EXEMPLOS DE USO:
+ * - Gravidade constante para baixo: new GravityForce({ x: 0, y: 0.005 })
+ * - Atração para ponto central: new GravityForce({ target: { x: 400, y: 300 }, strength: 0.002 })
+ */
+
+import { BaseForce, ForceContext } from './base-force';
+import type { Particle } from '../particle';
+
+export interface GravityForceOptions {
+  /** Vetor de força constante (ignora target se definido) */
+  vector?: { x: number; y: number };
+  /** Ponto de atração (força radial) */
+  target?: { x: number; y: number };
+  /** Intensidade da força */
+  strength?: number;
+  /** Distância máxima de influência (para força radial) */
+  maxDistance?: number;
+}
+
+export class GravityForce extends BaseForce {
+  constructor(private options: GravityForceOptions = {}) {}
+  
+  apply(particle: Particle, ctx: ForceContext): void {
+    const strength = this.options.strength ?? 0.002;
+    
+    if (this.options.vector) {
+      // Força constante (ex: gravidade para baixo)
+      particle.vx += this.options.vector.x * strength;
+      particle.vy += this.options.vector.y * strength;
+    } 
+    else if (this.options.target) {
+      // Força radial em direção ao target
+      const dx = this.options.target.x - particle.x;
+      const dy = this.options.target.y - particle.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 0 && (!this.options.maxDistance || dist < this.options.maxDistance)) {
+        // Força inversamente proporcional à distância (tipo gravidade newtoniana)
+        const force = strength / (dist + 1); // +1 evita divisão por zero
+        particle.vx += (dx / dist) * force;
+        particle.vy += (dy / dist) * force;
+      }
+    }
+  }
+}
+```
+
+#### 📝 Modificação: `src/engine/options.ts`
+
+```typescript
+import type { BaseForce } from './forces/base-force';
+
+export interface PhysicsOptions {
+  // ... opções existentes ...
+  
+  /**
+   * Array de forças personalizadas para aplicar a cada partícula
+   * Aplicadas após repulsão e antes de damping/thermal noise
+   */
+  customForces?: BaseForce[];
+}
+```
+
+#### 📝 Modificação: `src/engine/tick-particles.ts` (após repulsão)
+
+```typescript
+// === APÓS o loop de repulsão, ANTES do loop individual ===
+
+// Aplica forças customizadas registradas
+if (options.customForces?.length) {
+  const forceCtx: import('./forces/base-force').ForceContext = {
+    t,
+    containerWidth,
+    containerHeight,
+    options
+  };
+  
+  for (const p of particles) {
+    for (const force of options.customForces) {
+      force.apply(p, forceCtx, particles);
+    }
+  }
+}
+```
+
+**✅ Por que isso importa**: Permite extensibilidade sem modificar o core, seguindo Open/Closed Principle.
+
+---
+
+### 2.2 Colisão com Formas Complexas (Círculos, Polígonos)
+
+**Problema atual**: Apenas obstáculos retangulares (AABB).
+
+**Solução**: Sistema de colisão polimórfico com interface `Obstacle`.
+
+#### 📁 Arquivos a criar:
+
+```
+src/engine/
+├── collisions/
+│   ├── index.ts             ← NOVO: Tipos e factory de obstáculos
+│   ├── obstacle.ts          ← NOVO: Interface base
+│   ├── rect-obstacle.ts     ← NOVO: Implementação retangular (existente adaptada)
+│   ├── circle-obstacle.ts   ← NOVO: Obstáculo circular
+│   └── polygon-obstacle.ts  ← NOVO: Obstáculo poligonal convexo
+├── options.ts               ← MODIFICAR: ObstacleRect → Obstacle (união)
+├── tick-particles.ts        ← MODIFICAR: Loop de colisão polimórfico
+```
+
+#### 📝 Código: `src/engine/collisions/obstacle.ts` (NOVO)
+
+```typescript
+/**
+ * Interface para obstáculos de qualquer forma geométrica
+ * 
+ * POR QUE: Permite extensibilidade (novas formas) sem modificar o motor principal
+ */
+
+import type { Particle } from '../particle';
+
+export interface CollisionResult {
+  collided: boolean;
+  /** Nova posição da partícula após resolução */
+  newPosition?: { x: number; y: number };
+  /** Nova velocidade após reflexão */
+  newVelocity?: { vx: number; vy: number };
+}
+
+export interface Obstacle {
+  /**
+   * Testa colisão partícula-obstáculo
+   */
+  testCollision(particle: Particle, radius: number): boolean;
+  
+  /**
+   * Resolve colisão e retorna correções
+   */
+  resolveCollision(particle: Particle, radius: number): CollisionResult;
+  
+  /**
+   * Bounding box para otimização de broad-phase
+   */
+  getBounds(): { x: number; y: number; w: number; h: number };
+}
+```
+
+#### 📝 Código: `src/engine/collisions/circle-obstacle.ts` (NOVO)
+
+```typescript
+/**
+ * Obstáculo circular - partículas ricocheteiam na borda do círculo
+ * 
+ * POR QUE: Formas orgânicas, zonas de exclusão circulares, efeitos visuais
+ */
+
+import { Obstacle, CollisionResult } from './obstacle';
+import type { Particle } from '../particle';
+
+export interface CircleObstacleOptions {
+  x: number;      // Centro X
+  y: number;      // Centro Y
+  radius: number; // Raio do círculo
+  /** Se true, partícula é repelida para fora; se false, confinada para dentro */
+  external?: boolean;
+}
+
+export class CircleObstacle implements Obstacle {
+  constructor(private options: CircleObstacleOptions) {}
+  
+  testCollision(particle: Particle, radius: number): boolean {
+    const dx = particle.x - this.options.x;
+    const dy = particle.y - this.options.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    
+    return this.options.external
+      ? dist < this.options.radius + radius  // Colide se entrar no círculo
+      : dist > this.options.radius - radius; // Colide se sair do círculo
+  }
+  
+  resolveCollision(particle: Particle, radius: number): CollisionResult {
+    const dx = particle.x - this.options.x;
+    const dy = particle.y - this.options.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1; // evita divisão por zero
+    
+    const nx = dx / dist; // Normal unitária
+    const ny = dy / dist;
+    
+    const targetDist = this.options.external
+      ? this.options.radius + radius
+      : this.options.radius - radius;
+    
+    // Corrige posição para a borda
+    const correction = (dist - targetDist) * (this.options.external ? -1 : 1);
+    const newX = particle.x - nx * correction;
+    const newY = particle.y - ny * correction;
+    
+    // Reflete velocidade na normal (colisão elástica)
+    const dot = particle.vx * nx + particle.vy * ny;
+    const newVx = particle.vx - 2 * dot * nx;
+    const newVy = particle.vy - 2 * dot * ny;
+    
+    return {
+      collided: true,
+      newPosition: { x: newX, y: newY },
+      newVelocity: { vx: newVx, vy: newVy }
+    };
+  }
+  
+  getBounds() {
+    const r = this.options.radius;
+    return {
+      x: this.options.x - r,
+      y: this.options.y - r,
+      w: r * 2,
+      h: r * 2
+    };
+  }
+}
+```
+
+**✅ Por que isso importa**: Expande drasticamente os casos de uso (jogos, visualizações, UI interativa).
+
+---
+
+## 🗂️ FASE 3: Sistema de Renderização Modular (Semana 4-5)
+
+### 3.1 Adapter Canvas Nativo
+
+**Problema**: DOM é limitado a ~100 partículas para 60 FPS.
+
+**Solução**: Adapter Canvas para milhares de partículas.
+
+#### 📁 Arquivos a criar:
+
+```
+src/adapters/
+├── canvas.ts              ← NOVO: Adapter para Canvas 2D
+├── index.ts               ← MODIFICAR: Exportar novo adapter
+```
+
+#### 📝 Código: `src/adapters/canvas.ts` (NOVO)
+
+```typescript
+/**
+ * Adapter para renderização via Canvas 2D
+ * 
+ * POR QUE: Canvas é ~10-50x mais rápido que DOM para muitas partículas
+ * COMO: Desenha partículas diretamente no contexto Canvas, sem manipular DOM
+ */
+
+import type { Particle } from '../engine';
+
+export interface CanvasParticleStyle {
+  radius: number;
+  color: string | CanvasGradient | CanvasPattern;
+  opacity?: number;
+  borderWidth?: number;
+  borderColor?: string;
+}
+
+export interface RenderCanvasOptions {
+  /** Callback para estilizar cada partícula */
+  getStyle?: (particle: Particle, index: number) => CanvasParticleStyle;
+  /** Clear canvas antes de renderizar */
+  clearBeforeRender?: boolean;
+  /** Cor de fundo ao limpar */
+  clearColor?: string;
+}
+
+/**
+ * Renderiza partículas em um Canvas 2D
+ * 
+ * @param ctx - Contexto 2D do canvas
+ * @param particles - Array de partículas com posições atualizadas
+ * @param options - Opções de renderização
+ */
+export function renderParticlesToCanvas(
+  ctx: CanvasRenderingContext2D,
+  particles: Particle[],
+  options: RenderCanvasOptions = {}
+): void {
+  const {
+    getStyle = () => ({ radius: 8, color: '#6496ff' }),
+    clearBeforeRender = true,
+    clearColor = 'transparent'
+  } = options;
+  
+  if (clearBeforeRender) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+    ctx.fillStyle = clearColor;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.restore();
+  }
+  
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    const style = getStyle(p, i);
+    
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, style.radius, 0, Math.PI * 2);
+    
+    if (style.opacity !== undefined) {
+      ctx.globalAlpha = style.opacity;
+    }
+    
+    ctx.fillStyle = style.color;
+    ctx.fill();
+    
+    if (style.borderWidth && style.borderColor) {
+      ctx.strokeStyle = style.borderColor;
+      ctx.lineWidth = style.borderWidth;
+      ctx.stroke();
+    }
+  }
+  
+  // Reset alpha para não afetar renders subsequentes
+  ctx.globalAlpha = 1;
+}
+```
+
+#### 📝 Hook React para Canvas: `src/react/use-canvas-particles.ts` (NOVO)
+
+```typescript
+/**
+ * Hook React para partículas renderizadas em Canvas
+ * 
+ * POR QUE: Oferece API familiar (como usePhysicsParticles) mas com performance de Canvas
+ */
+
+'use client';
+
+import { useRef, useEffect, useCallback } from 'react';
+import { initializeParticles, tickParticles } from '../engine';
+import { renderParticlesToCanvas } from '../adapters/canvas';
+import type { Particle, PhysicsOptions } from '../engine';
+
+export function useCanvasParticles(
+  count: number,
+  canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  options: PhysicsOptions & {
+    /** Callback para estilizar partículas */
+    getParticleStyle?: (p: Particle, i: number) => import('../adapters/canvas').CanvasParticleStyle;
+  } = {}
+) {
+  const particles = useRef<Particle[]>([]);
+  const rafRef = useRef<number | null>(null);
+  const frameRef = useRef(0);
+  
+  const init = useCallback((w: number, h: number) => {
+    particles.current = initializeParticles(count, w, h, options.collisionRadius ?? 14);
+  }, [count, options.collisionRadius]);
+  
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    // Configura canvas para HiDPI
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    
+    const width = rect.width;
+    const height = rect.height;
+    
+    init(width, height);
+    frameRef.current = 0;
+    
+    const tick = () => {
+      tickParticles(
+        particles.current,
+        frameRef.current++,
+        width,
+        height,
+        options.externalForceRef?.current ?? null,
+        options.obstaclesRef?.current ?? null,
+        options
+      );
+      
+      renderParticlesToCanvas(ctx, particles.current, {
+        getStyle: options.getParticleStyle,
+        clearBeforeRender: true
+      });
+      
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    
+    rafRef.current = requestAnimationFrame(tick);
+    
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [canvasRef, count, options, init]);
+}
+```
+
+**✅ Por que isso importa**: Permite escalar para 1000+ partículas mantendo 60 FPS.
+
+---
+
+## 🗂️ FASE 4: DX e API (Semana 5-6)
+
+### 4.1 Builder Pattern para Configuração
+
+**Problema**: Objeto `PhysicsOptions` grande e propenso a erros.
+
+**Solução**: Builder fluente com validação e presets.
+
+#### 📁 Arquivos a criar:
+
+```
+src/
+├── builder/
+│   ├── index.ts             ← NOVO: Export do builder
+│   └── physics-builder.ts   ← NOVO: Implementação do builder
+```
+
+#### 📝 Código: `src/builder/physics-builder.ts` (NOVO)
+
+```typescript
+/**
+ * Builder fluente para configuração de física
+ * 
+ * POR QUE: 
+ * - Evita "object literal hell" com muitas opções
+ * - Validação em tempo de build (TypeScript)
+ * - Presets reutilizáveis
+ * - Documentação inline em cada método
+ */
+
+import type { PhysicsOptions } from '../engine/options';
+
+export class PhysicsBuilder {
+  private options: PhysicsOptions = {};
+  
+  /**
+   * Configura raio de colisão das partículas
+   * @param radius - Raio em pixels (recomendado: 8-20)
+   */
+  collisionRadius(radius: number): this {
+    this.options.collisionRadius = radius;
+    return this;
+  }
+  
+  /**
+   * Configura força de repulsão entre partículas
+   * @param strength - 0.1 (suave) a 5.0 (agressivo)
+   */
+  repulsion(strength: number): this {
+    this.options.repulsionStrength = strength;
+    return this;
+  }
+  
+  /**
+   * Configura velocidade máxima
+   * @param speed - Pixels por frame (60 FPS: 1.0 = 60px/s)
+   */
+  maxSpeed(speed: number): this {
+    this.options.maxSpeed = speed;
+    return this;
+  }
+  
+  /**
+   * Configura amortecimento (atrito)
+   * @param value - 0.9 (muito atrito) a 1.0 (sem atrito)
+   */
+  damping(value: number): this {
+    this.options.damping = value;
+    return this;
+  }
+  
+  /**
+   * Configura movimento browniano mínimo
+   * @param minSpeed - Limiar para ativar thermal noise
+   * @param noiseStrength - Intensidade do noise
+   */
+  brownian(minSpeed: number, noiseStrength: number): this {
+    this.options.minSpeed = minSpeed;
+    this.options.noiseStrength = noiseStrength;
+    return this;
+  }
+  
+  // === PRESETS PRONTOS ===
+  
+  /** Partículas calmas para background */
+  static calm(): PhysicsBuilder {
+    return new PhysicsBuilder()
+      .collisionRadius(12)
+      .repulsion(0.8)
+      .maxSpeed(0.5)
+      .damping(0.996)
+      .brownian(0.05, 0.008);
+  }
+  
+  /** Partículas energéticas para interação */
+  static energetic(): PhysicsBuilder {
+    return new PhysicsBuilder()
+      .collisionRadius(10)
+      .repulsion(2.5)
+      .maxSpeed(3.0)
+      .damping(0.990)
+      .brownian(0.15, 0.025);
+  }
+  
+  /** Simulação tipo "espaço" (pouco atrito) */
+  static space(): PhysicsBuilder {
+    return new PhysicsBuilder()
+      .collisionRadius(8)
+      .repulsion(3.0)
+      .maxSpeed(2.0)
+      .damping(0.999)
+      .brownian(0.02, 0.003);
+  }
+  
+  /**
+   * Finaliza e retorna opções validadas
+   */
+  build(): PhysicsOptions {
+    // Validações básicas (pode expandir)
+    if (this.options.damping !== undefined) {
+      if (this.options.damping < 0 || this.options.damping > 1) {
+        console.warn('damping deve estar entre 0 e 1');
+      }
+    }
+    return { ...this.options };
+  }
+}
+```
+
+#### 📝 Exemplo de uso (documentação):
+
+```typescript
+// Uso básico com builder
+const options = new PhysicsBuilder()
+  .collisionRadius(14)
+  .repulsion(1.4)
+  .maxSpeed(1.2)
+  .damping(0.994)
+  .brownian(0.08, 0.012)
+  .build();
+
+// Uso com preset + customização
+const options = PhysicsBuilder.calm()
+  .maxSpeed(0.7)  // Override do preset
+  .build();
+
+// Uso com hook React
+usePhysicsParticles(50, containerRef, particleRefs, PhysicsBuilder.energetic().build());
+```
+
+**✅ Por que isso importa**: Reduz erros, melhora legibilidade e acelera desenvolvimento.
+
+---
+
+## 🗂️ FASE 5: Qualidade e Testes (Semana 6-8)
+
+### 5.1 Expandir Suite de Testes
+
+#### 📁 Arquivos a criar/modificar:
+
+```
+__tests__/
+├── engine/
+│   ├── spatial-hash.test.ts    ← NOVO: Testes para spatial hash
+│   ├── forces/                 ← NOVO: Pasta para testes de forças
+│   │   ├── gravity.test.ts
+│   │   └── vortex.test.ts
+│   └── collisions/             ← NOVO: Testes para colisões
+│       ├── circle-obstacle.test.ts
+│       └── polygon-obstacle.test.ts
+├── adapters/
+│   └── canvas.test.ts          ← NOVO: Testes de renderização Canvas
+├── integration/
+│   └── worker-integration.test.ts ← NOVO: Teste worker ↔ main thread
+├── physics.test.ts             ← MODIFICAR: Expandir casos existentes
+```
+
+#### 📝 Exemplo: `__tests__/engine/spatial-hash.test.ts`
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { SpatialHash } from '../../src/engine/spatial-hash';
+
+describe('SpatialHash', () => {
+  it('agrupa partículas próximas na mesma célula', () => {
+    const hash = new SpatialHash(400, 300, 50); // cellSize = 50px
+    
+    const particles = [
+      { x: 25, y: 25 },   // célula (0,0)
+      { x: 30, y: 30 },   // célula (0,0) - mesma célula
+      { x: 100, y: 100 }, // célula (2,2) - célula diferente
+    ];
+    
+    hash.build(particles);
+    
+    // Query na posição (25,25) deve retornar as 2 primeiras
+    const nearby = hash.query(25, 25, 20);
+    expect(nearby).toContain(0);
+    expect(nearby).toContain(1);
+    expect(nearby).not.toContain(2);
+  });
+  
+  it('performance: reduz comparações vs força bruta', () => {
+    const particles = Array.from({ length: 200 }, (_, i) => ({
+      x: Math.random() * 800,
+      y: Math.random() * 600
+    }));
+    
+    // Força bruta: n*(n-1)/2 comparações
+    const bruteForceComparisons = (200 * 199) / 2; // 19.900
+    
+    const hash = new SpatialHash(800, 600, 40);
+    hash.build(particles);
+    
+    // Conta comparações com spatial hash
+    let hashComparisons = 0;
+    for (let i = 0; i < particles.length; i++) {
+      const nearby = hash.query(particles[i].x, particles[i].y, 30);
+      hashComparisons += nearby.filter(j => j > i).length;
+    }
+    
+    // Espera-se ~10x menos comparações
+    expect(hashComparisons).toBeLessThan(bruteForceComparisons * 0.2);
+  });
+});
+```
+
+### 5.2 Benchmarks Automatizados
+
+#### 📁 Arquivo: `__tests__/benchmarks/performance.bench.ts`
+
+```typescript
+import { bench, describe } from 'vitest';
+import { tickParticles } from '../../src/engine/tick-particles';
+import { initializeParticles } from '../../src/engine/init-particles';
+
+describe('Performance Benchmarks', () => {
+  const sizes = [50, 100, 200];
+  
+  for (const count of sizes) {
+    bench(`tickParticles com ${count} partículas (sem spatial hash)`, () => {
+      const particles = initializeParticles(count, 800, 600, 14);
+      tickParticles(particles, 0, 800, 600, null, null, {});
+    });
+    
+    bench(`tickParticles com ${count} partículas (com spatial hash)`, () => {
+      const particles = initializeParticles(count, 800, 600, 14);
+      tickParticles(particles, 0, 800, 600, null, null, { 
+        enableSpatialHash: true 
+      });
+    });
+  }
+});
+```
+
+**✅ Por que isso importa**: Garante que otimizações realmente funcionam e previne regressões.
+
+---
+
+## 📦 Estrutura Final do Projeto
+
+```
+Hadron/
+├── src/
+│   ├── engine/
+│   │   ├── particle.ts
+│   │   ├── options.ts
+│   │   ├── tick-particles.ts
+│   │   ├── init-particles.ts
+│   │   ├── halton.ts
+│   │   ├── noise.ts
+│   │   ├── spatial-hash.ts          ← NOVO
+│   │   ├── forces/                  ← NOVO
+│   │   │   ├── base-force.ts
+│   │   │   ├── gravity.ts
+│   │   │   ├── vortex.ts
+│   │   │   └── index.ts
+│   │   ├── collisions/              ← NOVO
+│   │   │   ├── obstacle.ts
+│   │   │   ├── rect-obstacle.ts
+│   │   │   ├── circle-obstacle.ts
+│   │   │   └── index.ts
+│   │   ├── worker/                  ← NOVO
+│   │   │   ├── physics-worker.ts
+│   │   │   ├── worker-protocol.ts
+│   │   │   └── index.ts
+│   │   └── index.ts
+│   ├── adapters/
+│   │   ├── dom.ts
+│   │   ├── canvas.ts                ← NOVO
+│   │   └── index.ts
+│   ├── device-motion/
+│   │   ├── singleton.ts
+│   │   └── index.ts
+│   ├── react/
+│   │   ├── use-physics-particles.ts
+│   │   ├── use-device-motion.ts
+│   │   ├── use-canvas-particles.ts  ← NOVO
+│   │   └── index.ts
+│   ├── builder/                     ← NOVO
+│   │   ├── physics-builder.ts
+│   │   └── index.ts
+│   └── index.ts
+│
+├── __tests__/
+│   ├── engine/
+│   ├── adapters/
+│   ├── integration/
+│   └── benchmarks/
+│
+├── examples/                        ← NOVO
+│   ├── react-canvas/
+│   ├── vanilla-worker/
+│   ├── custom-forces/
+│   └── obstacle-editor/
+│
+├── package.json                     ← MODIFICAR: scripts, exports
+├── tsconfig.json                    ← MODIFICAR: paths para novos módulos
+└── README.md                        ← MODIFICAR: documentação atualizada
+```
+
+---
+
+## 🛠️ Checklist de Implementação
+
+### ✅ Fase 1: Performance
+- [ ] Criar `spatial-hash.ts` com testes
+- [ ] Modificar `tick-particles.ts` para usar spatial hash condicional
+- [ ] Adicionar opção `enableSpatialHash` em `options.ts`
+- [ ] Criar `physics-worker.ts` e protocolo de mensagens
+- [ ] Criar factory `PhysicsWorker` com fallback
+- [ ] Testar performance com 50/100/200/500 partículas
+
+### ✅ Fase 2: Física Avançada
+- [ ] Criar sistema de `BaseForce` e registry
+- [ ] Implementar `GravityForce` e `VortexForce` como exemplos
+- [ ] Modificar `tickParticles` para aplicar forças customizadas
+- [ ] Criar interface `Obstacle` e implementar `CircleObstacle`
+- [ ] Atualizar colisão em `tickParticles` para polimorfismo
+- [ ] Documentar API de plugins com exemplos
+
+### ✅ Fase 3: Renderização
+- [ ] Criar `renderParticlesToCanvas` adapter
+- [ ] Criar hook `useCanvasParticles` para React
+- [ ] Adicionar exemplos de estilização customizada
+- [ ] Documentar tradeoffs DOM vs Canvas vs WebGL
+
+### ✅ Fase 4: DX
+- [ ] Implementar `PhysicsBuilder` com presets
+- [ ] Adicionar validação e warnings em tempo de dev
+- [ ] Atualizar documentação com exemplos de builder
+- [ ] Criar TypeScript playground no README
+
+### ✅ Fase 5: Qualidade
+- [ ] Expandir testes unitários para novas funcionalidades
+- [ ] Criar benchmarks automatizados com vitest
+- [ ] Adicionar CI pipeline para rodar testes + benchmarks
+- [ ] Criar exemplos interativos em `examples/`
+
+---
+
+## 💡 Dicas de Implementação para Você, Lu
+
+1. **Comece pequeno**: Implemente o spatial hash primeiro (maior impacto, menor risco).
+2. **Teste cada mudança**: Use os benchmarks para validar ganhos de performance.
+3. **Mantenha compatibilidade**: Sempre ofereça fallbacks (ex: spatial hash opcional).
+4. **Documente enquanto codifica**: Comentários no código + docs em `/Docs` ajudam você no futuro.
+5. **Use TypeScript a seu favor**: Tipos rigorosos evitam bugs em sistemas complexos.
+
+---
+
+## 🎁 Bônus: Ideias para o Futuro
+
+- [ ] **WebGPU Adapter**: Para 10.000+ partículas com GPU
+- [ ] **Sistema de Partículas Hierárquico**: Partículas que geram sub-partículas
+- [ ] **Exportação de Simulação**: Salvar/load estados da simulação
+- [ ] **Editor Visual de Obstáculos**: Ferramenta no-browser para criar cenários
+- [ ] **Integração com Three.js**: Partículas como sprites 3D
+
+---
+
+Lu, este plano é ambicioso mas **totalmente viável** porque:
+- ✅ Mantém compatibilidade com código existente
+- ✅ Cada fase entrega valor independente
+- ✅ Você pode pausar em qualquer ponto e já ter melhorias
+
+Quer que eu detalhe mais alguma fase específica? Ou prefere que eu comece a codificar a **Fase 1 (Spatial Hash)** como exemplo prático? 🚀

@@ -1,0 +1,54 @@
+{
+  "name": "physaac",
+  "version": "1.0.0",
+  "description": "Motor de física newtoniana para partículas em interfaces web — com thermal noise, giroscópio e zero re-renders.",
+  "keywords": ["physics", "particles", "animation", "react", "gyroscope"],
+  "license": "LGPL-3.0",
+  "files": ["dist"],
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/cjs/index.d.ts"
+    },
+    "./react": {
+      "import": "./dist/esm/react/index.js",
+      "require": "./dist/cjs/react/index.js",
+      "types": "./dist/cjs/react/index.d.ts"
+    },
+    "./device-motion": {
+      "import": "./dist/esm/device-motion/index.js",
+      "require": "./dist/cjs/device-motion/index.js",
+      "types": "./dist/cjs/device-motion/index.d.ts"
+    },
+    "./adapters": {
+      "import": "./dist/esm/adapters/index.js",
+      "require": "./dist/cjs/adapters/index.js",
+      "types": "./dist/cjs/adapters/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "^5.9.3",
+    "tsup": "^8.0.0",
+    "vitest": "^4.0.0"
+  }
+}
